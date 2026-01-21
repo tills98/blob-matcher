@@ -38,6 +38,7 @@ from blob_matcher.keypoints import (
     get_patch,
     keypoint_to_mapped_conic,
     keypoints_to_torch,
+    map_keypoint,
     physical_to_logical_distance,
 )
 from blob_matcher.utils import read_json
@@ -63,7 +64,8 @@ DATASETS: list[tuple[str, v2.Transform, dict[str, typing.Any], dict[str, typing.
             [v2.ColorJitter(), v2.GaussianBlur(kernel_size=(5, 5)), v2.GaussianNoise()]
         ),
         {
-            "base_scale": 0.4
+            "base_scale": 0.4,
+            "allow_artifacts": True,
         },
         {},
     ),
@@ -136,6 +138,9 @@ def generate_dataset(
     }
     torch.save(homographies, os.path.join(path, "homographies.pt"))
 
+    # create YOLO labels dir
+    os.makedirs(os.path.join(path, "labels"), exist_ok=True)
+    
     blobboard_json = read_json(boards[0][0])
     blobboard_shape = blobboard_json["preamble"]["board_config"]["canvas_size"]
     blobboard_shape = (
@@ -153,6 +158,7 @@ def generate_dataset(
     for i in range(len(backgrounds)):
         if os.path.exists(os.path.join(path, "warped_images", f"{i:04}.png")):
             continue
+
         img = (
             torchvision.io.decode_image(
                 os.path.join(os.getcwd(), backgrounds[i]),
@@ -172,9 +178,11 @@ def generate_dataset(
         # else:
         img = resize(img).to(device).unsqueeze(0)
         for board in homographies[backgrounds[i]]:
+            blobboard_img = pdf2image.convert_from_path(board[1], dpi=1200, grayscale=True)[0]
+            blobboard_t = torchvision.transforms.functional.pil_to_tensor(blobboard_img)
+
             blobboard = (
-                torchvision.io.decode_image(board[1], torchvision.io.ImageReadMode.GRAY)
-                .to(torch.float32)
+                blobboard_t.to(torch.float32)
                 .to(device)
                 / 255
             )
@@ -185,6 +193,58 @@ def generate_dataset(
         torchvision.utils.save_image(
             img, os.path.join(path, "warped_images", f"{i:04}.png")
         )
+
+        # write label file for image
+        with open(os.path.join(path, "labels", f"{i:04}.txt"), "w", encoding="utf-8") as f:
+            for board in homographies[backgrounds[i]]:
+                blobboard_info = read_json(board[0])
+
+                res_dpi = int(blobboard_info["preamble"]["board_config"]["print_density"]["value"])
+                bb_x_center_mm = float(blobboard_info["preamble"]["board_config"]["board_size"]["width"]["value"]) / 2
+                bb_y_center_mm = float(blobboard_info["preamble"]["board_config"]["board_size"]["height"]["value"]) / 2
+
+                bb_width_mm = float(blobboard_info["preamble"]["board_config"]["board_size"]["width"]["value"])
+                bb_height_mm = float(blobboard_info["preamble"]["board_config"]["board_size"]["height"]["value"])
+
+                bb_tl_mm = (0, 0)
+                bb_tr_mm = (bb_width_mm, 0)
+                bb_bl_mm = (0, bb_height_mm)
+                bb_br_mm = (bb_width_mm, bb_height_mm)
+
+                bb_tl_px = physical_to_logical_distance(bb_tl_mm[0], res_dpi), physical_to_logical_distance(bb_tl_mm[1], res_dpi)
+                bb_tr_px = physical_to_logical_distance(bb_tr_mm[0], res_dpi), physical_to_logical_distance(bb_tr_mm[1], res_dpi)
+                bb_bl_px = physical_to_logical_distance(bb_bl_mm[0], res_dpi), physical_to_logical_distance(bb_bl_mm[1], res_dpi)
+                bb_br_px = physical_to_logical_distance(bb_br_mm[0], res_dpi), physical_to_logical_distance(bb_br_mm[1], res_dpi)
+
+                bb_c_px = physical_to_logical_distance(bb_x_center_mm, res_dpi), physical_to_logical_distance(bb_y_center_mm, res_dpi)
+
+                homography = homographies[backgrounds[i]][board]
+
+                img_bb_tl_px = map_keypoint(homography, torch.tensor(bb_tl_px, dtype=torch.float32).to(device))
+                img_bb_tr_px = map_keypoint(homography, torch.tensor(bb_tr_px, dtype=torch.float32).to(device))
+                img_bb_bl_px = map_keypoint(homography, torch.tensor(bb_bl_px, dtype=torch.float32).to(device))
+                img_bb_br_px = map_keypoint(homography, torch.tensor(bb_br_px, dtype=torch.float32).to(device))
+                img_bb_c_px = map_keypoint(homography, torch.tensor(bb_c_px, dtype=torch.float32).to(device))
+
+                # Calculate axis-aligned bounding box from the four transformed corners
+                all_x = torch.stack([img_bb_tl_px[0], img_bb_tr_px[0], img_bb_bl_px[0], img_bb_br_px[0]])
+                all_y = torch.stack([img_bb_tl_px[1], img_bb_tr_px[1], img_bb_bl_px[1], img_bb_br_px[1]])
+
+                min_x = torch.min(all_x)
+                max_x = torch.max(all_x)
+                min_y = torch.min(all_y)
+                max_y = torch.max(all_y)
+
+                # Calculate center and dimensions of the covering rectangle
+                x_center = (min_x + max_x) / 2 / IMAGE_RESOLUTION[1]
+                y_center = (min_y + max_y) / 2 / IMAGE_RESOLUTION[0]
+                width = (max_x - min_x) / IMAGE_RESOLUTION[1]
+                height = (max_y - min_y) / IMAGE_RESOLUTION[0]
+                
+                line = f"0 {x_center.item()} {y_center.item()} {abs(width.item())} {abs(height.item())}\n"
+
+                f.write(line)
+
         continue
 
         blobboard_info = read_json(boards[i][0])
@@ -705,7 +765,7 @@ def main():
         curry(filter)(curry(flip(str.endswith))(".png")),
         curry(reduce)(list.__add__),
         curry(map)(lambda x: list(map(lambda f: os.path.join(x[0], f), x[2]))),
-    )(os.walk(os.path.join("./data/backgrounds")))
+    )(os.walk(os.path.join(args.backgrounds)))
     random.shuffle(background_filenames)
 
     num_images_total = min(len(boards), len(background_filenames))
@@ -741,15 +801,15 @@ def main():
             i * (num_validation_images // len(DATASETS)):
             (i + 1) * (num_validation_images // len(DATASETS))
         ]
-        os.makedirs(os.path.join("./data/datasets/new", dataset_name, "training"), exist_ok=True)
-        with open(os.path.join("./data/datasets/new", dataset_name, "training/backgrounds.txt"), "x", encoding="utf-8") as f:
+        os.makedirs(os.path.join(args.path, "./data/datasets/new", dataset_name, "training"), exist_ok=True)
+        with open(os.path.join(args.path, "./data/datasets/new", dataset_name, "training/backgrounds.txt"), "x", encoding="utf-8") as f:
             f.writelines(map(lambda b: b + "\n", _training_backgrounds))
-        with open(os.path.join("./data/datasets/new", dataset_name, "training/boards.txt"), "x", encoding="utf-8") as f:
+        with open(os.path.join(args.path, "./data/datasets/new", dataset_name, "training/boards.txt"), "x", encoding="utf-8") as f:
             f.writelines(map(lambda b: b[0] + "\n", _training_boards))
-        os.makedirs(os.path.join("./data/datasets/new", dataset_name, "validation"), exist_ok=True)
-        with open(os.path.join("./data/datasets/new", dataset_name, "validation/backgrounds.txt"), "x", encoding="utf-8") as f:
+        os.makedirs(os.path.join(args.path, "./data/datasets/new", dataset_name, "validation"), exist_ok=True)
+        with open(os.path.join(args.path, "./data/datasets/new", dataset_name, "validation/backgrounds.txt"), "x", encoding="utf-8") as f:
             f.writelines(map(lambda b: b + "\n", _validation_backgrounds))
-        with open(os.path.join("./data/datasets/new", dataset_name, "validation/boards.txt"), "x", encoding="utf-8") as f:
+        with open(os.path.join(args.path, "./data/datasets/new", dataset_name, "validation/boards.txt"), "x", encoding="utf-8") as f:
             f.writelines(map(lambda b: b[0] + "\n", _validation_boards))
         generate_dataset(
             cfg,

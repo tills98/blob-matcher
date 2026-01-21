@@ -39,6 +39,35 @@ def physical_to_logical_coordinates(x, resolution, border_width, canvas_offset):
     )
 
 
+def map_keypoint(homography: torch.Tensor, k: torch.Tensor) -> torch.Tensor:
+    """
+    Transforms a keypoint into a conic section and warps it via a homography.
+
+    When ignoring orientation a keypoint can be repersented by a circle. If the circle is represented as a conic
+    section, it can be transformed with a homography. We expect to obtain an elliptical conic section as a result,
+    since the perspective change of the used homographies are not that large.
+
+    Arguments:
+        homography: The homography with which the keypoint will be mapped.
+        k: The keypoint.
+
+    Returns:
+        An tensor of shape (3,3) representing the conic section of the mapped keypoint.
+    """
+    assert k.shape == (2,)
+
+    x = k[0]
+    y = k[1]
+    
+    # x' = Hx
+    mapped_keypoint = homography @ torch.tensor([x, y, 1.0], dtype=torch.float32).to(homography.device)
+
+    # normalize keypoint to get homogeneous coordinates
+    mapped_keypoint = mapped_keypoint / mapped_keypoint[2]
+    
+    return mapped_keypoint[:2]
+
+
 def keypoint_to_mapped_conic(homography: torch.Tensor, k: torch.Tensor) -> torch.Tensor:
     """
     Transforms a keypoint into a conic section and warps it via a homography.

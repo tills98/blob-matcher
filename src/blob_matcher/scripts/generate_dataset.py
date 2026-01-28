@@ -59,20 +59,22 @@ except ModuleNotFoundError:
 # The datasets to be created. Containing a name, a transform for the images, parameters for the homography sampling, and keypoint augmentation parameters
 DATASETS: list[tuple[str, v2.Transform, dict[str, typing.Any], dict[str, typing.Any]]] = [
     (
-        "generated",
+        "generated_single_2",
         v2.Compose(
-            [v2.ColorJitter(), v2.GaussianBlur(kernel_size=(5, 5)), v2.GaussianNoise()]
+            [v2.GaussianNoise(), v2.ColorJitter([0.1, 0.8]), v2.GaussianBlur(kernel_size=(5, 5))]
         ),
         {
-            "base_scale": 0.4,
+            "base_scale": 0.1,
             "allow_artifacts": True,
+            "scaling_amplitude": 0.4,
+            "perspective": True,
         },
         {},
     ),
 ]
 
-IMAGE_RESOLUTION = (4000, 6000)
-BLOBBOARD_RESOLUTION = (7087, 7087)
+IMAGE_RESOLUTION = (1280, 1920)
+BLOBBOARD_RESOLUTION = (6143, 6143)
 
 
 def map_blobs(
@@ -117,7 +119,7 @@ def generate_dataset(
     homography_kwargs,
     augmentation_args,
     is_validation=False,
-    max_boards_per_image=3
+    max_boards_per_image=1
 ):
     os.makedirs(os.path.join(path, "warped_images"), exist_ok=True)
     device = torch.device(
@@ -745,12 +747,12 @@ def main():
     # np.random.seed(cfg.TRAINING.SEED)
 
 
-    validation_split = 0.2
+    validation_split = 0.1
 
     boards = []
     board_files = os.listdir(args.boards)
     board_files.sort()
-    for i in range(0, len(board_files), 2):
+    for i in range(0, len(board_files) - 1, 2):
         assert board_files[i][:-4] == board_files[i + 1][:-3]
         boards.append(
             (
